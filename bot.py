@@ -57,7 +57,7 @@ def build_tracker_text(mode: str, game_date: str) -> str:
         mark = "✅" if g["correct"] else "❌"
         lines.append(f"{mark} {g['user_name']}")
 
-    leaderboard = storage.get_leaderboard(mode)
+    leaderboard = storage.get_leaderboard()
     if leaderboard:
         lines.append("")
         lines.append("**Leaderboard**")
@@ -98,6 +98,13 @@ class GuessGameBot(discord.Client):
             callback=self._setbatter_callback,
         )
         self.tree.add_command(setbatter_cmd)
+
+        reset_cmd = app_commands.Command(
+            name="resetleaderboard",
+            description="ADMIN: wipe the leaderboard and all guess history",
+            callback=self._resetleaderboard_callback,
+        )
+        self.tree.add_command(reset_cmd)
 
         postnow_cmd = app_commands.Command(
             name="postnow",
@@ -176,6 +183,13 @@ class GuessGameBot(discord.Client):
     async def _setbatter_callback(self, interaction: discord.Interaction):
         storage.set_config("batter_channel_id", str(interaction.channel_id))
         await interaction.response.send_message("✅ Daily mystery BATTER game will post here.")
+
+    async def _resetleaderboard_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        storage.clear_all_guesses()
+        await interaction.response.send_message("🧹 Leaderboard wiped -- fresh start for everyone.")
 
     async def _postnow_callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
