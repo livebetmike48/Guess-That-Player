@@ -198,6 +198,20 @@ class GuessGameBot(discord.Client):
         except Exception as e:
             log.error("Tracker update failed (%s %s): %s", mode, game_date, e)
 
+    async def _refresh_all_trackers(self):
+        """Re-edits both channels' tracker messages -- used after admin
+        actions (clears/resets) so displayed leaderboards never sit stale."""
+        today = et_date_str(0)
+        for mode, cfg in MODES.items():
+            channel_id = storage.get_config(cfg["channel_key"])
+            if not channel_id:
+                continue
+            channel = self.get_channel(int(channel_id))
+            if channel is None:
+                continue
+            if storage.get_game(today, mode):
+                await self._update_tracker(mode, today, channel)
+
     async def _setpitcher_callback(self, interaction: discord.Interaction):
         storage.set_config("pitcher_channel_id", str(interaction.channel_id))
         await interaction.response.send_message("✅ Daily mystery PITCHER game will post here.")
@@ -212,6 +226,7 @@ class GuessGameBot(discord.Client):
             return
         storage.clear_all_guesses()
         await interaction.response.send_message("🧹 Leaderboard wiped -- fresh start for everyone.")
+        await self._refresh_all_trackers()
 
     async def _cleargame_callback(self, interaction: discord.Interaction,
                                    mode: Literal["pitcher", "batter"]):
@@ -223,6 +238,7 @@ class GuessGameBot(discord.Client):
         await interaction.response.send_message(
             f"🧹 Today's {mode} game discarded (guesses on it removed). Repost with /postnow mode:{mode}."
         )
+        await self._refresh_all_trackers()
 
     async def _answer_callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
@@ -250,6 +266,7 @@ class GuessGameBot(discord.Client):
         await interaction.response.send_message(
             f"🧹 Today's games ({today}) discarded -- the scheduled posts (or /postnow) will post fresh ones."
         )
+        await self._refresh_all_trackers()
 
     async def _postnow_callback(self, interaction: discord.Interaction,
                                  mode: Literal["pitcher", "batter", "both"] = "both"):
