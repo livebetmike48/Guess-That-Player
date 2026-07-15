@@ -5,11 +5,33 @@ first (fresh content), then falls back to random dates across the whole
 the game without a post, and the answer pool stays less predictable.
 """
 import random
+import unicodedata
 from datetime import datetime, timedelta
 import requests
 
 BASE = "https://statsapi.mlb.com/api/v1"
 SEASON_START = "2026-03-26"
+
+# Compilation/recap videos feature many players -- the tagged player is
+# often NOT the person most visible in a random 8-second slice. Skip them.
+BAD_TITLE_WORDS = ["highlights", "recap", "condensed", "top plays", "best of", "every "]
+
+
+def _fold(text: str) -> str:
+    text = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in text if not unicodedata.combining(ch)).lower()
+
+
+def _title_features_player(title: str, player_name: str) -> bool:
+    """The tagged player's LAST NAME must literally appear in the title --
+    'Bazzana homers (12)' confirms Bazzana is the star of the clip. Fixes a
+    real bug where the first keyword tag was a different player than the
+    one visibly featured, making everyone's correct guess score as wrong."""
+    title_folded = _fold(title)
+    if any(bad in title_folded for bad in BAD_TITLE_WORDS):
+        return False
+    last_name = _fold(player_name).split()[-1] if player_name else ""
+    return bool(last_name) and last_name in title_folded
 
 
 def get_final_game_pks(date_str: str) -> list[int]:
@@ -44,6 +66,8 @@ def get_highlights_with_players(game_pk: int) -> list[dict]:
                 break
         if not player_id or not player_name:
             continue
+        if not _title_features_player(item.get("title", ""), player_name):
+            continue  # tagged player isn't verifiably the star of this clip
 
         mp4_url = None
         for playback in item.get("playbacks", []) or []:
