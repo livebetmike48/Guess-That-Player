@@ -107,6 +107,20 @@ class GuessGameBot(discord.Client):
         )
         self.tree.add_command(reset_cmd)
 
+        cleargame_cmd = app_commands.Command(
+            name="cleargame",
+            description="ADMIN: discard ONE of today's games (and its guesses) so it can repost fresh",
+            callback=self._cleargame_callback,
+        )
+        self.tree.add_command(cleargame_cmd)
+
+        answer_cmd = app_commands.Command(
+            name="answer",
+            description="ADMIN: privately see today's stored answer for this channel's game",
+            callback=self._answer_callback,
+        )
+        self.tree.add_command(answer_cmd)
+
         cleartoday_cmd = app_commands.Command(
             name="cleartoday",
             description="ADMIN: discard today's posted games (and their guesses) so posts can run fresh",
@@ -198,6 +212,34 @@ class GuessGameBot(discord.Client):
             return
         storage.clear_all_guesses()
         await interaction.response.send_message("🧹 Leaderboard wiped -- fresh start for everyone.")
+
+    async def _cleargame_callback(self, interaction: discord.Interaction,
+                                   mode: Literal["pitcher", "batter"]):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        today = et_date_str(0)
+        storage.clear_game(today, mode)
+        await interaction.response.send_message(
+            f"🧹 Today's {mode} game discarded (guesses on it removed). Repost with /postnow mode:{mode}."
+        )
+
+    async def _answer_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        mode = self._mode_for_channel(interaction.channel_id)
+        if mode is None:
+            await interaction.response.send_message("This isn't a game channel.", ephemeral=True)
+            return
+        game = storage.get_game(et_date_str(0), mode)
+        if game is None:
+            await interaction.response.send_message("No game posted today.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"Today's {mode} answer: **{game['player_name']}**\nClip title: {game['title']}",
+            ephemeral=True,
+        )
 
     async def _cleartoday_callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
