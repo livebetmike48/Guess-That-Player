@@ -131,6 +131,14 @@ def clear_all_guesses():
         c.execute("DELETE FROM guesses")
 
 
+def clear_game(game_date: str, mode: str):
+    """Deletes ONE game (and its guesses) for a date -- lets you discard a
+    bad game without touching the other channel's results."""
+    with _conn() as c:
+        c.execute("DELETE FROM games WHERE game_date = ? AND mode = ?", (game_date, mode))
+        c.execute("DELETE FROM guesses WHERE game_date = ? AND mode = ?", (game_date, mode))
+
+
 def clear_games_for_date(game_date: str):
     """Deletes a date's game records AND their guesses -- lets the
     scheduled posts run fresh that day (used to discard test posts)."""
