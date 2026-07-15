@@ -37,13 +37,9 @@ def et_date_str(offset_days: int = 0) -> str:
     return et.strftime("%Y-%m-%d")
 
 
-def build_daily_message(mode: str, yesterday_game: dict | None) -> str:
+def build_daily_message(mode: str) -> str:
     cfg = MODES[mode]
-    lines = []
-    if yesterday_game:
-        lines.append(f"Yesterday's {cfg['game_name']} was **{yesterday_game['player_name']}**.")
-        lines.append("")
-    lines.append(f"**{cfg['game_name']}!** — {cfg['prompt']}")
+    lines = [f"**{cfg['game_name']}!** — {cfg['prompt']}"]
     lines.append("Guess with `/guess <name>` — one guess each.")
     return "\n".join(lines)
 
@@ -113,13 +109,6 @@ class GuessGameBot(discord.Client):
             callback=self._cleargame_callback,
         )
         self.tree.add_command(cleargame_cmd)
-
-        answer_cmd = app_commands.Command(
-            name="answer",
-            description="ADMIN: privately see today's stored answer for this channel's game",
-            callback=self._answer_callback,
-        )
-        self.tree.add_command(answer_cmd)
 
         cleartoday_cmd = app_commands.Command(
             name="cleartoday",
@@ -240,23 +229,6 @@ class GuessGameBot(discord.Client):
         )
         await self._refresh_all_trackers()
 
-    async def _answer_callback(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message("Admin only.", ephemeral=True)
-            return
-        mode = self._mode_for_channel(interaction.channel_id)
-        if mode is None:
-            await interaction.response.send_message("This isn't a game channel.", ephemeral=True)
-            return
-        game = storage.get_game(et_date_str(0), mode)
-        if game is None:
-            await interaction.response.send_message("No game posted today.", ephemeral=True)
-            return
-        await interaction.response.send_message(
-            f"Today's {mode} answer: **{game['player_name']}**\nClip title: {game['title']}",
-            ephemeral=True,
-        )
-
     async def _cleartoday_callback(self, interaction: discord.Interaction):
         if not interaction.user.guild_permissions.administrator:
             await interaction.response.send_message("Admin only.", ephemeral=True)
@@ -333,11 +305,10 @@ async def post_daily_games(bot: GuessGameBot, only_mode: str | None = None) -> d
             results[mode] = "video_failed"
             continue
 
-        yesterday_game = storage.get_game(yesterday, mode)
         storage.save_game(today, mode, highlight["player_id"], highlight["player_name"], highlight["title"])
 
         try:
-            message_text = build_daily_message(mode, yesterday_game)
+            message_text = build_daily_message(mode)
             await channel.send(message_text, file=discord.File(clip_path))
             await bot._update_tracker(mode, today, channel)
             results[mode] = "posted"
@@ -353,15 +324,42 @@ async def post_daily_games(bot: GuessGameBot, only_mode: str | None = None) -> d
     return results
 
 
-# Fires at both post times; each run posts whichever game matches the hour
-# (pitcher at 17:00 UTC = 1 PM ET, batter at 20:00 UTC = 4 PM ET).
-@tasks.loop(time=[dtime(hour=17, minute=0), dtime(hour=20, minute=0)])
+async def post_reveal(bot: GuessGameBot, mode: str):
+    """Public answer reveal for the currently-active game (posted yesterday),
+    one minute before the new game replaces it."""
+    cfg = MODES[mode]
+    channel_id = storage.get_config(cfg["channel_key"])
+    if not channel_id:
+        return
+    channel = bot.get_channel(int(channel_id))
+    if channel is None:
+        return
+    game_date = et_date_str(-1)
+    game = storage.get_game(game_date, mode)
+    if game is None:
+        return
+    guesses = storage.get_guesses(game_date, mode)
+    right = sum(1 for g in guesses if g["correct"])
+    tally = f" — {right}/{len(guesses)} got it right!" if guesses else ""
+    await channel.send(f"⏰ Time's up! The {cfg['game_name']} answer was **{game['player_name']}**{tally}")
+
+
+# Reveals fire one minute before each new post:
+# pitcher reveal 16:59 UTC (12:59 PM ET) -> new game 17:00 (1 PM ET)
+# batter reveal 19:59 UTC (3:59 PM ET) -> new game 20:00 (4 PM ET)
+@tasks.loop(time=[dtime(hour=16, minute=59), dtime(hour=17, minute=0),
+                  dtime(hour=19, minute=59), dtime(hour=20, minute=0)])
 async def daily_post(bot: GuessGameBot):
     try:
-        hour = datetime.now(timezone.utc).hour
-        mode = next((m for m, cfg in MODES.items() if cfg["post_hour_utc"] == hour), None)
-        if mode:
-            await post_daily_games(bot, only_mode=mode)
+        now = datetime.now(timezone.utc)
+        if now.hour == 16:
+            await post_reveal(bot, "pitcher")
+        elif now.hour == 17:
+            await post_daily_games(bot, only_mode="pitcher")
+        elif now.hour == 19:
+            await post_reveal(bot, "batter")
+        elif now.hour == 20:
+            await post_daily_games(bot, only_mode="batter")
     except Exception as e:
         log.error("daily_post cycle failed, will retry next scheduled run: %s", e)
 
