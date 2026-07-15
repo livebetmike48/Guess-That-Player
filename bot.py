@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 from datetime import datetime, timedelta, timezone, time as dtime
+from typing import Literal
 
 import discord
 from discord import app_commands
@@ -106,6 +107,13 @@ class GuessGameBot(discord.Client):
         )
         self.tree.add_command(reset_cmd)
 
+        cleartoday_cmd = app_commands.Command(
+            name="cleartoday",
+            description="ADMIN: discard today's posted games (and their guesses) so posts can run fresh",
+            callback=self._cleartoday_callback,
+        )
+        self.tree.add_command(cleartoday_cmd)
+
         postnow_cmd = app_commands.Command(
             name="postnow",
             description="Manually post today's games right now (for testing/late setup)",
@@ -191,10 +199,32 @@ class GuessGameBot(discord.Client):
         storage.clear_all_guesses()
         await interaction.response.send_message("🧹 Leaderboard wiped -- fresh start for everyone.")
 
-    async def _postnow_callback(self, interaction: discord.Interaction):
+    async def _cleartoday_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        today = et_date_str(0)
+        storage.clear_games_for_date(today)
+        await interaction.response.send_message(
+            f"🧹 Today's games ({today}) discarded -- the scheduled posts (or /postnow) will post fresh ones."
+        )
+
+    async def _postnow_callback(self, interaction: discord.Interaction,
+                                 mode: Literal["pitcher", "batter", "both"] = "both"):
         await interaction.response.defer()
-        posted = await post_daily_games(self)
-        await interaction.followup.send(f"Posted {posted} game(s)." if posted else "Couldn't post -- check channels are set and yesterday had games with highlights.")
+        only = None if mode == "both" else mode
+        results = await post_daily_games(self, only_mode=only)
+        friendly = {
+            "posted": "✅ posted",
+            "already_posted": "ℹ️ already posted today (won't double-post)",
+            "not_configured": "⚠️ channel not set",
+            "channel_missing": "⚠️ saved channel not found",
+            "no_highlight": "❌ no suitable highlight found",
+            "video_failed": "❌ video processing failed (check logs)",
+            "send_failed": "❌ posting failed (check logs)",
+        }
+        lines = [f"**{MODES[m]['game_name']}**: {friendly.get(status, status)}" for m, status in results.items()]
+        await interaction.followup.send("\n".join(lines))
 
     async def on_ready(self):
         log.info("Logged in as %s", self.user)
@@ -205,38 +235,43 @@ class GuessGameBot(discord.Client):
 client = GuessGameBot()
 
 
-async def post_daily_games(bot: GuessGameBot, only_mode: str | None = None) -> int:
-    """Posts games. only_mode limits to one game ('pitcher'/'batter');
-    None posts any that haven't gone out yet today."""
+async def post_daily_games(bot: GuessGameBot, only_mode: str | None = None) -> dict:
+    """Posts games. Returns {mode: status} for honest reporting."""
     today = et_date_str(0)
     yesterday = et_date_str(-1)
-    posted = 0
+    results = {}
 
     for mode, cfg in MODES.items():
         if only_mode and mode != only_mode:
             continue
         channel_id = storage.get_config(cfg["channel_key"])
         if not channel_id:
+            results[mode] = "not_configured"
             continue
         channel = bot.get_channel(int(channel_id))
         if channel is None:
+            results[mode] = "channel_missing"
             continue
         if storage.get_game(today, mode):
-            continue  # already posted today
+            results[mode] = "already_posted"
+            continue
 
         try:
             highlight = await asyncio.to_thread(mlb_api.pick_daily_highlight, yesterday, mode == "pitcher")
         except Exception as e:
             log.error("Highlight pick failed for %s: %s", mode, e)
+            results[mode] = "no_highlight"
             continue
         if highlight is None:
-            log.warning("No suitable %s highlight found for %s", mode, yesterday)
+            log.warning("No suitable %s highlight found (searched season)", mode)
+            results[mode] = "no_highlight"
             continue
 
         clip_path = f"/tmp/guess_{mode}_{today}.mp4"
         ok = await asyncio.to_thread(video.make_blurred_clip, highlight["mp4_url"], clip_path)
         if not ok:
             log.error("Video processing failed for %s (%s)", mode, highlight["title"])
+            results[mode] = "video_failed"
             continue
 
         yesterday_game = storage.get_game(yesterday, mode)
@@ -245,21 +280,18 @@ async def post_daily_games(bot: GuessGameBot, only_mode: str | None = None) -> i
         try:
             message_text = build_daily_message(mode, yesterday_game)
             await channel.send(message_text, file=discord.File(clip_path))
-            await bot_update_tracker(bot, mode, today, channel)
-            posted += 1
+            await bot._update_tracker(mode, today, channel)
+            results[mode] = "posted"
             log.info("Posted %s game: answer is %s", mode, highlight["player_name"])
         except Exception as e:
             log.error("Posting %s game failed: %s", mode, e)
+            results[mode] = "send_failed"
         finally:
             try:
                 os.unlink(clip_path)
             except OSError:
                 pass
-    return posted
-
-
-async def bot_update_tracker(bot: GuessGameBot, mode: str, game_date: str, channel):
-    await bot._update_tracker(mode, game_date, channel)
+    return results
 
 
 # Fires at both post times; each run posts whichever game matches the hour
