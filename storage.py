@@ -129,3 +129,11 @@ def clear_all_guesses():
     """Wipes the leaderboard (all guess history, both games)."""
     with _conn() as c:
         c.execute("DELETE FROM guesses")
+
+
+def clear_games_for_date(game_date: str):
+    """Deletes a date's game records AND their guesses -- lets the
+    scheduled posts run fresh that day (used to discard test posts)."""
+    with _conn() as c:
+        c.execute("DELETE FROM games WHERE game_date = ?", (game_date,))
+        c.execute("DELETE FROM guesses WHERE game_date = ?", (game_date,))
