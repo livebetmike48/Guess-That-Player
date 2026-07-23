@@ -52,9 +52,14 @@ def _probe_duration_seconds(ffmpeg: str, path: str) -> float | None:
         return None
 
 
-def make_blurred_clip(mp4_url: str, out_path: str) -> bool:
+def make_blurred_clip(mp4_url: str, out_path: str, start_frac: float | None = None) -> bool:
     """Downloads the highlight and writes a blurred clip to out_path.
-    Returns True on success."""
+    Returns True on success. start_frac overrides GUESS_START_FRAC for
+    this one clip -- single-play Film Room clips start AT the action, so
+    the caller passes ~0.05 for those instead of the skip-the-intro
+    default tuned for highlight packages."""
+    if start_frac is None:
+        start_frac = START_FRAC
     with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
         tmp_path = tmp.name
     try:
@@ -71,7 +76,7 @@ def make_blurred_clip(mp4_url: str, out_path: str) -> bool:
         start_seconds = 0.0
         duration = _probe_duration_seconds(ffmpeg, tmp_path)
         if duration and duration > CLIP_SECONDS:
-            start_seconds = min(duration * START_FRAC, duration - CLIP_SECONDS)
+            start_seconds = min(duration * start_frac, duration - CLIP_SECONDS)
 
         cmd = [
             ffmpeg, "-y",
