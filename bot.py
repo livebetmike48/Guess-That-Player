@@ -125,6 +125,20 @@ class GuessGameBot(discord.Client):
         )
         self.tree.add_command(answerkey_cmd)
 
+        verify_cmd = app_commands.Command(
+            name="verifyguesses",
+            description="ADMIN: privately see everyone's raw guesses for a game today",
+            callback=self._verifyguesses_callback,
+        )
+        self.tree.add_command(verify_cmd)
+
+        regrade_cmd = app_commands.Command(
+            name="regrade",
+            description="ADMIN: mark a member's guess today correct/incorrect (fixes bad grading)",
+            callback=self._regrade_callback,
+        )
+        self.tree.add_command(regrade_cmd)
+
         postnow_cmd = app_commands.Command(
             name="postnow",
             description="Manually post today's games right now (for testing/late setup)",
@@ -263,6 +277,48 @@ class GuessGameBot(discord.Client):
                 extra = f" — {title}" if title else ""
                 lines.append(f"{cfg['emoji']} {cfg['game_name']}: **{game['player_name']}**{extra}")
         await interaction.response.send_message("\n".join(lines), ephemeral=True)
+
+    async def _verifyguesses_callback(self, interaction: discord.Interaction,
+                                       mode: Literal["pitcher", "batter"]):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        today = et_date_str(0)
+        game = storage.get_game(today, mode)
+        header = f"🔎 **{MODES[mode]['game_name']} — raw guesses today**"
+        if game:
+            header += f" (answer: **{game['player_name']}**)"
+        guesses = storage.get_guesses(today, mode)
+        if not guesses:
+            await interaction.response.send_message(header + "\n*No guesses yet.*", ephemeral=True)
+            return
+        lines = [header]
+        for g in guesses:
+            mark = "✅" if g["correct"] else "❌"
+            lines.append(f"{mark} **{g['user_name']}** typed: `{g.get('guess', '?')}`")
+        text = "\n".join(lines)
+        await interaction.response.send_message(text[:1990], ephemeral=True)
+
+    async def _regrade_callback(self, interaction: discord.Interaction,
+                                 mode: Literal["pitcher", "batter"],
+                                 user: discord.User, correct: bool):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        today = et_date_str(0)
+        changed = storage.set_guess_correct(today, mode, str(user.id), correct)
+        if not changed:
+            await interaction.response.send_message(
+                f"{user.display_name} has no {mode} guess recorded today.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            f"✅ Regraded: {user.display_name}'s {mode} guess is now "
+            f"{'CORRECT' if correct else 'incorrect'}. Tracker updated.", ephemeral=True)
+        channel_id = storage.get_config(MODES[mode]["channel_key"])
+        if channel_id:
+            channel = self.get_channel(int(channel_id))
+            if channel:
+                await self._update_tracker(mode, today, channel)
 
     async def _postnow_callback(self, interaction: discord.Interaction,
                                  mode: Literal["pitcher", "batter", "both"] = "both"):
