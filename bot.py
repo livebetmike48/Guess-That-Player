@@ -10,6 +10,7 @@ from discord.ext import tasks
 from dotenv import load_dotenv
 
 import mlb_api
+import guess_plays
 import video
 import storage
 import matching
@@ -287,19 +288,37 @@ async def post_daily_games(bot: GuessGameBot, only_mode: str | None = None) -> d
             results[mode] = "already_posted"
             continue
 
+        # July 22 rework: try a SINGLE-PLAY clip first (a real HR for
+        # batter mode / a real K for pitcher mode via Film Room) -- the
+        # clip IS the play, so ads/mound-walks/filler are impossible by
+        # construction. The old highlight-package source is the fallback
+        # when no play clip resolves.
+        source_is_play = False
+        highlight = None
         try:
-            highlight = await asyncio.to_thread(mlb_api.pick_daily_highlight, yesterday, mode == "pitcher")
+            highlight = await asyncio.to_thread(guess_plays.pick_play, yesterday, mode == "pitcher")
+            source_is_play = highlight is not None
         except Exception as e:
-            log.error("Highlight pick failed for %s: %s", mode, e)
-            results[mode] = "no_highlight"
-            continue
+            log.error("Play-clip pick failed for %s (falling back to highlights): %s", mode, e)
+
         if highlight is None:
-            log.warning("No suitable %s highlight found (searched season)", mode)
+            try:
+                highlight = await asyncio.to_thread(mlb_api.pick_daily_highlight, yesterday, mode == "pitcher")
+            except Exception as e:
+                log.error("Highlight pick failed for %s: %s", mode, e)
+                results[mode] = "no_highlight"
+                continue
+        if highlight is None:
+            log.warning("No suitable %s clip found (play source and highlight fallback)", mode)
             results[mode] = "no_highlight"
             continue
+        log.info("%s clip source: %s", mode, "single-play (Film Room)" if source_is_play else "highlight package (fallback)")
 
         clip_path = f"/tmp/guess_{mode}_{today}.mp4"
-        ok = await asyncio.to_thread(video.make_blurred_clip, highlight["mp4_url"], clip_path)
+        # Single-play clips start AT the action (windup/swing), so slice
+        # from near the top; package clips keep the skip-the-intro default.
+        start_frac = 0.05 if source_is_play else None
+        ok = await asyncio.to_thread(video.make_blurred_clip, highlight["mp4_url"], clip_path, start_frac)
         if not ok:
             log.error("Video processing failed for %s (%s)", mode, highlight["title"])
             results[mode] = "video_failed"
