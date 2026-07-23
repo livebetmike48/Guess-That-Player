@@ -118,6 +118,13 @@ class GuessGameBot(discord.Client):
         )
         self.tree.add_command(cleartoday_cmd)
 
+        answerkey_cmd = app_commands.Command(
+            name="answerkey",
+            description="ADMIN: privately see today's answers (only you see this, nothing posts)",
+            callback=self._answerkey_callback,
+        )
+        self.tree.add_command(answerkey_cmd)
+
         postnow_cmd = app_commands.Command(
             name="postnow",
             description="Manually post today's games right now (for testing/late setup)",
@@ -240,6 +247,22 @@ class GuessGameBot(discord.Client):
             f"🧹 Today's games ({today}) discarded -- the scheduled posts (or /postnow) will post fresh ones."
         )
         await self._refresh_all_trackers()
+
+    async def _answerkey_callback(self, interaction: discord.Interaction):
+        if not interaction.user.guild_permissions.administrator:
+            await interaction.response.send_message("Admin only.", ephemeral=True)
+            return
+        today = et_date_str(0)
+        lines = ["🔑 **Today's answer key** (only you can see this)"]
+        for mode, cfg in MODES.items():
+            game = storage.get_game(today, mode)
+            if game is None:
+                lines.append(f"{cfg['emoji']} {cfg['game_name']}: *not posted yet today*")
+            else:
+                title = game.get("title") or ""
+                extra = f" — {title}" if title else ""
+                lines.append(f"{cfg['emoji']} {cfg['game_name']}: **{game['player_name']}**{extra}")
+        await interaction.response.send_message("\n".join(lines), ephemeral=True)
 
     async def _postnow_callback(self, interaction: discord.Interaction,
                                  mode: Literal["pitcher", "batter", "both"] = "both"):
