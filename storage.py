@@ -145,3 +145,15 @@ def clear_games_for_date(game_date: str):
     with _conn() as c:
         c.execute("DELETE FROM games WHERE game_date = ?", (game_date,))
         c.execute("DELETE FROM guesses WHERE game_date = ?", (game_date,))
+
+
+def set_guess_correct(game_date: str, mode: str, user_id: str, correct: bool) -> bool:
+    """Admin regrade: flips one member's result for a day's game. Returns
+    False if they never guessed. Leaderboard/tracker recompute from this
+    table, so the fix propagates everywhere automatically."""
+    with _conn() as c:
+        cur = c.execute(
+            "UPDATE guesses SET correct = ? WHERE game_date = ? AND mode = ? AND user_id = ?",
+            (1 if correct else 0, game_date, mode, user_id),
+        )
+        return cur.rowcount > 0
