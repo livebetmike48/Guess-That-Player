@@ -21,9 +21,12 @@ July 18 rework:
 """
 import os
 import re
+import logging
 import subprocess
 import tempfile
 import requests
+
+log = logging.getLogger("guess.video")
 
 CLIP_SECONDS = float(os.getenv("GUESS_CLIP_SECONDS", "8"))
 START_FRAC = float(os.getenv("GUESS_START_FRAC", "0.30"))
@@ -78,19 +81,37 @@ def make_blurred_clip(mp4_url: str, out_path: str, start_frac: float | None = No
         if duration and duration > CLIP_SECONDS:
             start_seconds = min(duration * start_frac, duration - CLIP_SECONDS)
 
+        dl_size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
+        if dl_size < 1024:
+            log.error("clip download too small (%d bytes) from %s -- source gave no "
+                      "real video (likely a play with no Film Room clip yet)", dl_size, mp4_url)
+            return False
+
+        # -ss AFTER -i (accurate seek): with the fast seek before -i, a clip
+        # SHORTER than our computed start lands past EOF and ffmpeg writes an
+        # empty file -- exactly what short single-play K clips do. Accurate
+        # seek is slightly slower but never overruns.
         cmd = [
             ffmpeg, "-y",
-            "-ss", f"{start_seconds:.2f}",
             "-i", tmp_path,
+            "-ss", f"{start_seconds:.2f}",
             "-t", str(CLIP_SECONDS),
             "-vf", f"scale={SCALE_WIDTH}:-2,{BLUR_STRENGTH}",
             "-an",  # strip audio -- announcer usually names the player!
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+            "-pix_fmt", "yuv420p",  # some MLB sources are yuv422p -> unplayable in Discord
             out_path,
         ]
         result = subprocess.run(cmd, capture_output=True, timeout=120)
-        return result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0
-    except Exception:
+        out_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
+        if result.returncode != 0 or out_size == 0:
+            tail = (result.stderr or b"").decode("utf-8", "replace")[-600:]
+            log.error("ffmpeg failed (rc=%s, out=%dB, dur=%s, start=%.2f, in=%dB) for %s\n%s",
+                      result.returncode, out_size, duration, start_seconds, dl_size, mp4_url, tail)
+            return False
+        return True
+    except Exception as e:
+        log.error("clip processing exception for %s: %s", mp4_url, e, exc_info=True)
         return False
     finally:
         try:
