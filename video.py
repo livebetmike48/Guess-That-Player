@@ -63,58 +63,91 @@ def make_blurred_clip(mp4_url: str, out_path: str, start_frac: float | None = No
     default tuned for highlight packages."""
     if start_frac is None:
         start_frac = START_FRAC
-    with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
-        tmp_path = tmp.name
+    ffmpeg = _ffmpeg_path()
+    # MLB serves two very different things behind ".mp4":
+    #   - real highlight MP4s (batter/HR path) -> python download works
+    #   - fastball-clips.mlb.com URLs (Film Room K path) which are HLS /
+    #     range-gated segments -- a plain GET returns an invalid partial
+    #     blob ("moov atom not found"). ffmpeg reading the URL DIRECTLY
+    #     handles the streaming protocol and CDN headers natively.
+    # So: let ffmpeg fetch the URL itself. Fall back to a local download
+    # only if the direct read fails (some sources 403 hotlinked ffmpeg).
+    UA = ("Mozilla/5.0 (compatible; GuessBot/1.0)")
+
+    def _run(input_arg: str, start_seconds: float, headers: bool):
+        cmd = [ffmpeg, "-y"]
+        if headers:
+            cmd += ["-user_agent", UA]
+        cmd += [
+            "-i", input_arg,
+            "-ss", f"{start_seconds:.2f}",
+            "-t", str(CLIP_SECONDS),
+            "-vf", f"scale={SCALE_WIDTH}:-2,{BLUR_STRENGTH}",
+            "-an",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+            "-pix_fmt", "yuv420p",
+            out_path,
+        ]
+        return subprocess.run(cmd, capture_output=True, timeout=180)
+
+    def _duration_of(input_arg: str, headers: bool):
+        try:
+            probe = [ffmpeg]
+            if headers:
+                probe += ["-user_agent", UA]
+            probe += ["-i", input_arg]
+            r = subprocess.run(probe, capture_output=True, timeout=60)
+            m = _DURATION_RE.search(r.stderr or b"")
+            if not m:
+                return None
+            h, mnt, s, frac = m.groups()
+            return int(h)*3600 + int(mnt)*60 + int(s) + float(f"0.{frac.decode()}")
+        except Exception:
+            return None
+
+    tmp_path = None
     try:
-        resp = requests.get(mp4_url, timeout=60, stream=True)
+        # 1) direct-from-URL (works for HLS/fastball-clips AND plain mp4)
+        duration = _duration_of(mp4_url, headers=True)
+        start_seconds = 0.0
+        if duration and duration > CLIP_SECONDS:
+            start_seconds = min(duration * start_frac, duration - CLIP_SECONDS)
+        result = _run(mp4_url, start_seconds, headers=True)
+        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return True
+        direct_tail = (result.stderr or b"").decode("utf-8", "replace")[-400:]
+
+        # 2) fallback: download then read locally (some plain mp4s only)
+        with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
+            tmp_path = tmp.name
+        resp = requests.get(mp4_url, timeout=60, stream=True,
+                            headers={"User-Agent": UA})
         resp.raise_for_status()
         with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1 << 16):
                 f.write(chunk)
-
-        ffmpeg = _ffmpeg_path()
-
-        # Start the cut partway into the clip to skip broadcast lead-in,
-        # clamped so the slice always fits inside the video.
+        dl_size = os.path.getsize(tmp_path)
+        if dl_size < 1024:
+            log.error("clip source gave no real video (%dB) and direct read failed for %s",
+                      dl_size, mp4_url)
+            return False
+        duration = _duration_of(tmp_path, headers=False)
         start_seconds = 0.0
-        duration = _probe_duration_seconds(ffmpeg, tmp_path)
         if duration and duration > CLIP_SECONDS:
             start_seconds = min(duration * start_frac, duration - CLIP_SECONDS)
-
-        dl_size = os.path.getsize(tmp_path) if os.path.exists(tmp_path) else 0
-        if dl_size < 1024:
-            log.error("clip download too small (%d bytes) from %s -- source gave no "
-                      "real video (likely a play with no Film Room clip yet)", dl_size, mp4_url)
-            return False
-
-        # -ss AFTER -i (accurate seek): with the fast seek before -i, a clip
-        # SHORTER than our computed start lands past EOF and ffmpeg writes an
-        # empty file -- exactly what short single-play K clips do. Accurate
-        # seek is slightly slower but never overruns.
-        cmd = [
-            ffmpeg, "-y",
-            "-i", tmp_path,
-            "-ss", f"{start_seconds:.2f}",
-            "-t", str(CLIP_SECONDS),
-            "-vf", f"scale={SCALE_WIDTH}:-2,{BLUR_STRENGTH}",
-            "-an",  # strip audio -- announcer usually names the player!
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
-            "-pix_fmt", "yuv420p",  # some MLB sources are yuv422p -> unplayable in Discord
-            out_path,
-        ]
-        result = subprocess.run(cmd, capture_output=True, timeout=120)
-        out_size = os.path.getsize(out_path) if os.path.exists(out_path) else 0
-        if result.returncode != 0 or out_size == 0:
-            tail = (result.stderr or b"").decode("utf-8", "replace")[-600:]
-            log.error("ffmpeg failed (rc=%s, out=%dB, dur=%s, start=%.2f, in=%dB) for %s\n%s",
-                      result.returncode, out_size, duration, start_seconds, dl_size, mp4_url, tail)
-            return False
-        return True
+        result = _run(tmp_path, start_seconds, headers=False)
+        if result.returncode == 0 and os.path.exists(out_path) and os.path.getsize(out_path) > 0:
+            return True
+        tail = (result.stderr or b"").decode("utf-8", "replace")[-400:]
+        log.error("clip FAILED both ways for %s\n  direct: %s\n  download(%dB): %s",
+                  mp4_url, direct_tail, dl_size, tail)
+        return False
     except Exception as e:
         log.error("clip processing exception for %s: %s", mp4_url, e, exc_info=True)
         return False
     finally:
-        try:
-            os.unlink(tmp_path)
-        except OSError:
-            pass
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
