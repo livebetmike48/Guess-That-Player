@@ -72,12 +72,15 @@ def make_blurred_clip(mp4_url: str, out_path: str, start_frac: float | None = No
     #     handles the streaming protocol and CDN headers natively.
     # So: let ffmpeg fetch the URL itself. Fall back to a local download
     # only if the direct read fails (some sources 403 hotlinked ffmpeg).
-    UA = ("Mozilla/5.0 (compatible; GuessBot/1.0)")
+    UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36")
+    REFERER = "https://www.mlb.com/"
 
     def _run(input_arg: str, start_seconds: float, headers: bool):
         cmd = [ffmpeg, "-y"]
         if headers:
-            cmd += ["-user_agent", UA]
+            cmd += ["-user_agent", UA,
+                    "-headers", f"Referer: {REFERER}\r\n"]
         cmd += [
             "-i", input_arg,
             "-ss", f"{start_seconds:.2f}",
@@ -94,7 +97,7 @@ def make_blurred_clip(mp4_url: str, out_path: str, start_frac: float | None = No
         try:
             probe = [ffmpeg]
             if headers:
-                probe += ["-user_agent", UA]
+                probe += ["-user_agent", UA, "-headers", f"Referer: {REFERER}\r\n"]
             probe += ["-i", input_arg]
             r = subprocess.run(probe, capture_output=True, timeout=60)
             m = _DURATION_RE.search(r.stderr or b"")
@@ -120,8 +123,11 @@ def make_blurred_clip(mp4_url: str, out_path: str, start_frac: float | None = No
         # 2) fallback: download then read locally (some plain mp4s only)
         with tempfile.NamedTemporaryFile(suffix=".mp4", delete=False) as tmp:
             tmp_path = tmp.name
-        resp = requests.get(mp4_url, timeout=60, stream=True,
-                            headers={"User-Agent": UA})
+        resp = requests.get(mp4_url, timeout=60, stream=True, headers={
+            "User-Agent": UA, "Referer": REFERER,
+            "Accept": "video/mp4,video/*;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+        })
         resp.raise_for_status()
         with open(tmp_path, "wb") as f:
             for chunk in resp.iter_content(chunk_size=1 << 16):
